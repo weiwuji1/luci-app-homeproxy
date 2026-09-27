@@ -1,57 +1,91 @@
-name: Build luci-app-homeproxy
+name: Build luci-app-homeproxy (patched multi-arch)
 on:
   workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - 'Makefile'
+      - 'root/**'
+      - 'htdocs/**'
+      - 'po/**'
+      - '.github/workflows/build.yml'
+
 permissions:
   contents: write
+
 env:
   TZ: Asia/Shanghai
-  PACKAGE_NAME: luci-app-homeproxy
   PACKAGE_VERSION: '26.071.13677~ec92da1'
-  SDK_URL: https://downloads.openwrt.org/releases/25.12.2/targets/x86/64/openwrt-sdk-25.12.2-x86-64_gcc-14.3.0_musl.Linux-x86_64.tar.zst
-  SDK_DIR: openwrt-sdk-25.12.2-x86-64_gcc-14.3.0_musl.Linux-x86_64
-  REPO_URL: https://github.com/immortalwrt/homeproxy.git
-  REPO_BRANCH: master
 
 jobs:
   build:
-    name: Build Package
+    name: Build ${{ matrix.arch }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            sdk_url: https://downloads.openwrt.org/releases/25.12.2/targets/x86/64/openwrt-sdk-25.12.2-x86-64_gcc-14.3.0_musl.Linux-x86_64.tar.zst
+            sdk_dir: openwrt-sdk-25.12.2-x86-64_gcc-14.3.0_musl.Linux-x86_64
+            target_cfg: CONFIG_TARGET_x86=y
+            subtarget_cfg: CONFIG_TARGET_x86_64=y
+          - arch: aarch64
+            sdk_url: https://downloads.openwrt.org/releases/25.12.2/targets/armsr/armv8/openwrt-sdk-25.12.2-armsr-armv8_gcc-14.3.0_musl.Linux-x86_64.tar.zst
+            sdk_dir: openwrt-sdk-25.12.2-armsr-armv8_gcc-14.3.0_musl.Linux-x86_64
+            target_cfg: CONFIG_TARGET_armsr=y
+            subtarget_cfg: CONFIG_TARGET_armsr_armv8=y
+
     steps:
-      - name: Checkout
+      - name: Checkout patched source
         uses: actions/checkout@v4
         with:
-          fetch-depth: 1
+          path: src
 
-      - name: Download SDK
+      - name: Free disk space
         run: |
-          wget -q "${{ env.SDK_URL }}" -O sdk.tar.zst
-          tar -xf sdk.tar.zst -C ~
-          mv ~/${{ env.SDK_DIR }} ~/openwrt
-          rm sdk.tar.zst
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+                      /opt/hostedtoolcache/CodeQL /usr/local/share/boost || true
+          df -h /
 
-      - name: Setup Environment
+      - name: Install build dependencies
         run: |
-          sudo apt-get update
-          sudo apt-get install -y build-essential ccache ecj fastjar file gawk gettext git \
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq build-essential ccache ecj fastjar file gawk gettext git \
             libelf-dev libncurses5-dev libncursesw5-dev libssl-dev python3 python3-pip \
-            rsync subversion unzip wget xsltproc zip zlib1g-dev
+            python3-setuptools rsync subversion unzip wget xsltproc zip zlib1g-dev zstd
 
-      - name: Add Feeds & Clone Source
+      - name: Download and unpack SDK (${{ matrix.arch }})
         run: |
-          cd ~/openwrt
-          echo "src-git immortalwrt_pkgs https://github.com/immortalwrt/packages.git;openwrt-25.12" >> feeds.conf.default
+          wget -q "${{ matrix.sdk_url }}" -O sdk.tar.zst
+          tar -xf sdk.tar.zst
+          mv "${{ matrix.sdk_dir }}" "$HOME/openwrt"
+          rm -f sdk.tar.zst
+
+      - name: Add feeds
+        run: |
+          cd "$HOME/openwrt"
+          grep -q immortalwrt_pkgs feeds.conf.default || \
+            echo "src-git immortalwrt_pkgs https://github.com/immortalwrt/packages.git;openwrt-25.12" >> feeds.conf.default
           ./scripts/feeds update -a
           ./scripts/feeds install -a
-          mkdir -p package/custom
-          git clone --depth 1 -b ${{ env.REPO_BRANCH }} ${{ env.REPO_URL }} package/custom/homeproxy
+
+      - name: Copy patched package into SDK
+        run: |
+          mkdir -p "$HOME/openwrt/package/custom"
+          rm -rf "$HOME/openwrt/package/custom/homeproxy"
+          cp -a "$GITHUB_WORKSPACE/src" "$HOME/openwrt/package/custom/homeproxy"
+          rm -rf "$HOME/openwrt/package/custom/homeproxy/.git" \
+                 "$HOME/openwrt/package/custom/homeproxy/.github"
 
       - name: Configure
         run: |
-          cd ~/openwrt
+          cd "$HOME/openwrt"
           {
-            echo "CONFIG_TARGET_x86=y"
-            echo "CONFIG_TARGET_x86_64=y"
+            echo "${{ matrix.target_cfg }}"
+            echo "${{ matrix.subtarget_cfg }}"
             echo "CONFIG_PACKAGE_luci-app-homeproxy=y"
             echo "CONFIG_PACKAGE_luci-i18n-homeproxy-zh-cn=y"
             echo "CONFIG_ALL_NONSHARED=n"
@@ -62,95 +96,80 @@ jobs:
 
       - name: Compile
         run: |
-          cd ~/openwrt
-          make package/custom/homeproxy/luci-app-homeproxy/compile V=s -j$(nproc) || \
-          make package/custom/homeproxy/compile V=s -j$(nproc)
+          cd "$HOME/openwrt"
+          make package/custom/homeproxy/luci-app-homeproxy/compile V=s -j"$(nproc)" || \
+          make package/custom/homeproxy/compile V=s -j"$(nproc)"
 
-      - name: Collect Artifacts
-        id: collect
+      - name: Collect artifacts
         run: |
-          mkdir -p $GITHUB_WORKSPACE/output
-          find ~/openwrt/bin/packages/ -type f -name "*homeproxy*.apk" -exec cp -f {} $GITHUB_WORKSPACE/output/ \; 2>/dev/null || true
-          
-          echo "=== Collected files ==="
-          ls -lh $GITHUB_WORKSPACE/output/
-          
-          # 使用 outputs 传递文件路径（比 $GITHUB_ENV 更可靠）
-          MAIN_FILE=""
-          I18N_FILE=""
-          for f in $GITHUB_WORKSPACE/output/*.apk; do
+          mkdir -p "$GITHUB_WORKSPACE/output"
+          find "$HOME/openwrt/bin/packages/" -type f -name "*homeproxy*.apk" \
+            -exec cp -f {} "$GITHUB_WORKSPACE/output/" \; 2>/dev/null || true
+          cd "$GITHUB_WORKSPACE/output"
+          echo "=== collected ==="
+          ls -lh
+          for f in *.apk; do
             [ -f "$f" ] || continue
-            case "$(basename "$f")" in
-              *luci-i18n-homeproxy-zh-cn*) I18N_FILE="$f" ;;
-              *luci-app-homeproxy*) 
-                [ -z "$MAIN_FILE" ] && MAIN_FILE="$f" 
-                ;;
-            esac
+            mv -f "$f" "${f%.apk}_${{ matrix.arch }}.apk"
           done
-          
-          [ -n "$MAIN_FILE" ] && echo "main_file=$MAIN_FILE" >> $GITHUB_OUTPUT
-          [ -n "$I18N_FILE" ] && echo "i18n_file=$I18N_FILE" >> $GITHUB_OUTPUT
-          echo "main=$MAIN_FILE"
-          echo "i18n=$I18N_FILE"
+          echo "=== renamed (arch-suffixed) ==="
+          ls -lh
+          test -n "$(ls -A *.apk 2>/dev/null)" || { echo "::error::no apk produced"; exit 1; }
 
-      - name: Create Release
-        if: success() && steps.collect.outputs.main_file != ''
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: apk-${{ matrix.arch }}
+          path: ${{ github.workspace }}/output/*.apk
+          if-no-files-found: error
+
+      - name: Cleanup SDK
+        if: always()
+        run: rm -rf "$HOME/openwrt" || true
+
+  release:
+    name: Publish release
+    needs: build
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: List artifacts
+        run: ls -lh dist
+
+      - name: Create release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          
-          MAIN_FILE="${{ steps.collect.outputs.main_file }}"
-          I18N_FILE="${{ steps.collect.outputs.i18n_file }}"
-          
-          # 使用 basename 获取纯文件名，避免路径解析问题
-          MAIN_NAME=$(basename -- "$MAIN_FILE")
-          I18N_NAME=""
-          [ -n "$I18N_FILE" ] && [ -f "$I18N_FILE" ] && I18N_NAME=$(basename -- "$I18N_FILE")
-          
-          # 生成 Release 正文（使用纯 echo，避免 heredoc/printf 陷阱）
           {
-            echo "## luci-app-homeproxy v${{ env.PACKAGE_VERSION }}"
+            echo "## luci-app-homeproxy (patched) v${{ env.PACKAGE_VERSION }}"
             echo ""
-            echo "**Firmware:** OpenWrt 25.12.2"
-            echo "**Arch:** x86/64"
-            echo "**Package:** \`$MAIN_NAME\`"
-            [ -n "$I18N_NAME" ] && echo "**中文包:** \`$I18N_NAME\`"
+            echo "- **Firmware:** OpenWrt 25.12.2"
+            echo "- **Arch:** x86_64 / aarch64"
+            echo "- **改动:** 自动提取订阅链接内嵌证书（tls_certificate / cert / pinSHA256），保持 tls_insecure=0，无需 insecure。"
             echo ""
-            echo "### 安装命令"
-            echo ""
+            echo "### 安装"
             echo '```bash'
-            echo "apk add --allow-untrusted /tmp/$MAIN_NAME"
-            [ -n "$I18N_NAME" ] && echo "apk add --allow-untrusted /tmp/$I18N_NAME"
-            echo ""
+            for f in dist/*.apk; do
+              echo "apk add --allow-untrusted /tmp/$(basename "$f")"
+            done
             echo "rm -f /tmp/luci-indexcache.*"
             echo "/etc/init.d/rpcd reload"
             echo '```'
-            echo ""
-            echo "或通过 LuCI 后台上传安装。"
-          } > /tmp/release_body.txt
-          
-          # 上传文件：使用数组方式传递，避免空格/特殊字符问题
-          gh release delete "${{ github.ref_name }}" --yes 2>/dev/null || true
-          
-          if [ -n "$I18N_NAME" ] && [ -f "$I18N_FILE" ]; then
-            gh release create "${{ github.ref_name }}" \
-              --title "luci-app-homeproxy v${{ env.PACKAGE_VERSION }}" \
-              --notes-file /tmp/release_body.txt \
-              -- "$MAIN_FILE" "$I18N_FILE"
-          else
-            gh release create "${{ github.ref_name }}" \
-              --title "luci-app-homeproxy v${{ env.PACKAGE_VERSION }}" \
-              --notes-file /tmp/release_body.txt \
-              -- "$MAIN_FILE"
-          fi
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          } > /tmp/body.md
+          gh release delete "${{ github.ref_name }}" --yes --cleanup-tag 2>/dev/null || true
+          gh release create "${{ github.ref_name }}" \
+            --title "luci-app-homeproxy (patched) v${{ env.PACKAGE_VERSION }}" \
+            --notes-file /tmp/body.md \
+            --repo "${{ github.repository }}" \
+            -- dist/*.apk
 
-      - name: Cleanup SDK
-        run: |
-          rm -rf ~/openwrt
-          echo "SDK cleaned"
-
-      - name: Cleanup Releases
+      - name: Cleanup old releases
         uses: dev-drprasad/delete-older-releases@v0.3.4
         with:
           keep_latest: 10
