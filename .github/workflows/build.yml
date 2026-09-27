@@ -134,6 +134,7 @@ jobs:
       - name: Create release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
           {
@@ -152,7 +153,9 @@ jobs:
             echo "/etc/init.d/rpcd reload"
             echo '```'
           } > /tmp/body.md
-          gh release delete "${{ github.ref_name }}" --yes 2>/dev/null || true
+          # 本 job 无 checkout，gh 无法从 git remote 推断仓库，必须显式 --repo
+          gh release delete "${{ github.ref_name }}" --yes --repo "${{ github.repository }}" \
+            || echo "::notice::没有同名 release 需要删除"
           gh release create "${{ github.ref_name }}" \
             --title "luci-app-homeproxy (patched) · noarch · #${{ github.run_number }}" \
             --notes-file /tmp/body.md \
