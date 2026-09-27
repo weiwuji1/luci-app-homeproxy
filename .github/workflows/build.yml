@@ -147,7 +147,7 @@ jobs:
         run: |
           set -euo pipefail
           {
-            echo "## luci-app-homeproxy (patched) v${{ env.PACKAGE_VERSION }}"
+            echo "## luci-app-homeproxy (patched) · x86_64 + aarch64"
             echo ""
             echo "- **Firmware:** OpenWrt 25.12.2"
             echo "- **Arch:** x86_64 / aarch64"
@@ -162,9 +162,9 @@ jobs:
             echo "/etc/init.d/rpcd reload"
             echo '```'
           } > /tmp/body.md
-          gh release delete "${{ github.ref_name }}" --yes --cleanup-tag 2>/dev/null || true
+          gh release delete "${{ github.ref_name }}" --yes 2>/dev/null || true
           gh release create "${{ github.ref_name }}" \
-            --title "luci-app-homeproxy (patched) v${{ env.PACKAGE_VERSION }}" \
+            --title "luci-app-homeproxy (patched) · x86_64 + aarch64 · #${{ github.run_number }}" \
             --notes-file /tmp/body.md \
             --repo "${{ github.repository }}" \
             -- dist/*.apk
