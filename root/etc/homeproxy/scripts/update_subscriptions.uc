@@ -8,7 +8,7 @@
 'use strict';
 
 import { md5 } from 'digest';
-import { open } from 'fs';
+import { open, writefile } from 'fs';
 import { connect } from 'ubus';
 import { cursor } from 'uci';
 
@@ -571,11 +571,21 @@ function main() {
 				if (config.type in ['vless', 'vmess'])
 					config.packet_encoding = packet_encoding;
 
-				/* 自动提取链接内嵌证书并钉扎：证书存为单行(换行->|)，由 generate_client 落盘（补丁新增） */
+				/* 自动提取链接内嵌证书并钉扎（补丁新增）：证书直接写入
+				   /etc/homeproxy/certs/ 并填 tls_cert_path —— GUI 的"证书路径"
+				   能看到、重启/升级不丢，且无需打开 insecure */
 				if (config.tls === '1') {
 					let cert = extract_certificate(node);
+
 					if (cert) {
-						config.tls_cert_pem = replace(cert, /\n/g, '|');
+						let dir = HP_DIR + '/certs';
+						/* 文件名 = 可读节点名 + 名字哈希前 8 位（保证唯一） */
+						let name = replace(label ? label : 'node', /[^A-Za-z0-9._-]+/g, '_');
+
+						system('mkdir -p ' + dir);
+						config.tls_cert_path = dir + '/' + substr(name, 0, 40) + '-' + substr(nameHash, 0, 8) + '.pem';
+						writefile(config.tls_cert_path, cert + '\n');
+
 						config.tls_insecure = '0';
 						config.tls_self_sign = '1';
 					}
@@ -624,13 +634,20 @@ function main() {
 
 			log(sprintf('Removing node: %s.', cfg.label || cfg['name']));
 		} else {
+			/* 补丁修改：原逻辑只遍历 UCI 里"已有的键"，导致已存在的节点
+			   永远得不到新增选项（如 tls_cert_path / tls_self_sign）。
+			   改为：写入新解析结果的全部键，再清理上游已移除的键。 */
+			const fresh = node_cache[cfg.grouphash][cfg['.name']];
+
+			map(keys(fresh), (v) => uci.set(uciconfig, cfg['.name'], v, fresh[v]));
 			map(keys(cfg), (v) => {
-				if (v in node_cache[cfg.grouphash][cfg['.name']])
-					uci.set(uciconfig, cfg['.name'], v, node_cache[cfg.grouphash][cfg['.name']][v]);
-				else
-					uci.delete(uciconfig, cfg['.name'], v);
+				if (v in fresh || substr(v, 0, 1) === '.')
+					return null;
+
+				uci.delete(uciconfig, cfg['.name'], v);
 			});
-			node_cache[cfg.grouphash][cfg['.name']].isExisting = true;
+
+			fresh.isExisting = true;
 		}
 	});
 	for (let nodes in node_result)

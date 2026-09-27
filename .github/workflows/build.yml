@@ -50,9 +50,55 @@ jobs:
       - name: Install build dependencies
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq build-essential ccache ecj fastjar file gawk gettext git \
-            libelf-dev libncurses5-dev libncursesw5-dev libssl-dev python3 python3-pip \
-            python3-setuptools rsync subversion unzip wget xsltproc zip zlib1g-dev zstd
+          sudo apt-get install -y -qq build-essential ccache cmake ecj fastjar file gawk gettext git \
+            libelf-dev libjson-c-dev libncurses5-dev libncursesw5-dev libpcre2-dev libssl-dev \
+            python3 python3-pip python3-setuptools rsync subversion unzip wget xsltproc zip \
+            zlib1g-dev zstd
+
+      - name: Cache ucode syntax checker
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/ucode-bin
+          key: ucode-syntax-checker-${{ runner.os }}-v1
+
+      - name: Validate ucode syntax of patched scripts
+        run: |
+          set -uo pipefail
+
+          UCODE_BIN="$RUNNER_TEMP/ucode-bin/ucode"
+
+          if [ ! -x "$UCODE_BIN" ]; then
+            echo "::group::首次运行：编译 ucode 语法检查器（之后走缓存，约 10 秒）"
+            git clone --depth 1 https://github.com/jow-/ucode.git "$RUNNER_TEMP/ucode-src"
+            cmake -S "$RUNNER_TEMP/ucode-src" -B "$RUNNER_TEMP/ucode-build" -DCMAKE_BUILD_TYPE=Release >/dev/null
+            cmake --build "$RUNNER_TEMP/ucode-build" -j"$(nproc)" >/dev/null
+            mkdir -p "$RUNNER_TEMP/ucode-bin"
+            cp "$RUNNER_TEMP/ucode-build/ucode" "$UCODE_BIN"
+            echo "::endgroup::"
+          else
+            echo "ucode 语法检查器来自缓存"
+          fi
+
+          if ! "$UCODE_BIN" -e 'exit(0)'; then
+            echo "::warning::ucode 不可用，跳过语法检查（不阻塞构建）"
+            exit 0
+          fi
+
+          # luci.mk 只把 root/ 下的 .uc 原样拷进包、不做语法编译，
+          # 语法错误会静默出厂并让路由器上的订阅更新直接失败 —— 这里显式校验
+          fail=0
+          for f in src/root/etc/homeproxy/scripts/*.uc; do
+            # 剥离 luci.* 模块 import：构建环境没有 LuCI 模块，仅影响本地解析
+            sed -E "s#^import .* from 'luci\.[^']*';\$##" "$f" > "$RUNNER_TEMP/chk.uc"
+            if "$UCODE_BIN" -c "$RUNNER_TEMP/chk.uc"; then
+              echo "OK   $f"
+            else
+              echo "::error::ucode 语法错误：$f"
+              fail=1
+            fi
+          done
+
+          exit $fail
 
       - name: Download and unpack SDK
         run: |
