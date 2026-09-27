@@ -1,4 +1,4 @@
-name: Build luci-app-homeproxy (patched multi-arch)
+name: Build luci-app-homeproxy (patched, noarch)
 on:
   workflow_dispatch:
   push:
@@ -16,27 +16,16 @@ permissions:
 
 env:
   TZ: Asia/Shanghai
-  PACKAGE_VERSION: '26.071.13677~ec92da1'
+  # luci-app-homeproxy 的元数据是 arch: noarch（源自 Makefile 里 LUCI_PKGARCH:=all），
+  # 一个包即可装到任意架构，因此只需用一个 SDK 编译一次。
+  SDK_URL: https://downloads.openwrt.org/releases/25.12.2/targets/x86/64/openwrt-sdk-25.12.2-x86-64_gcc-14.3.0_musl.Linux-x86_64.tar.zst
+  SDK_DIR: openwrt-sdk-25.12.2-x86-64_gcc-14.3.0_musl.Linux-x86_64
 
 jobs:
   build:
-    name: Build ${{ matrix.arch }}
+    name: Build noarch package
     runs-on: ubuntu-24.04
-    timeout-minutes: 90
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - arch: x86_64
-            sdk_url: https://downloads.openwrt.org/releases/25.12.2/targets/x86/64/openwrt-sdk-25.12.2-x86-64_gcc-14.3.0_musl.Linux-x86_64.tar.zst
-            sdk_dir: openwrt-sdk-25.12.2-x86-64_gcc-14.3.0_musl.Linux-x86_64
-            target_cfg: CONFIG_TARGET_x86=y
-            subtarget_cfg: CONFIG_TARGET_x86_64=y
-          - arch: aarch64
-            sdk_url: https://downloads.openwrt.org/releases/25.12.2/targets/armsr/armv8/openwrt-sdk-25.12.2-armsr-armv8_gcc-14.3.0_musl.Linux-x86_64.tar.zst
-            sdk_dir: openwrt-sdk-25.12.2-armsr-armv8_gcc-14.3.0_musl.Linux-x86_64
-            target_cfg: CONFIG_TARGET_armsr=y
-            subtarget_cfg: CONFIG_TARGET_armsr_armv8=y
+    timeout-minutes: 60
 
     steps:
       - name: Checkout patched source
@@ -44,10 +33,18 @@ jobs:
         with:
           path: src
 
-      - name: Free disk space
+      - name: Ensure disk space
         run: |
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
-                      /opt/hostedtoolcache/CodeQL /usr/local/share/boost || true
+          df -h /
+          free_kb=$(df -Pk / | awk 'NR==2 {print $4}')
+          echo "可用空间: $((free_kb / 1024 / 1024)) GiB"
+          if [ "$free_kb" -lt 20971520 ]; then
+            echo "::warning::可用空间不足 20 GiB，清理 runner 预装 SDK 以留出余量"
+            sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+                        /opt/hostedtoolcache/CodeQL /usr/local/share/boost || true
+          else
+            echo "空间充足，跳过清理（省下约 1.5 分钟）"
+          fi
           df -h /
 
       - name: Install build dependencies
@@ -57,11 +54,11 @@ jobs:
             libelf-dev libncurses5-dev libncursesw5-dev libssl-dev python3 python3-pip \
             python3-setuptools rsync subversion unzip wget xsltproc zip zlib1g-dev zstd
 
-      - name: Download and unpack SDK (${{ matrix.arch }})
+      - name: Download and unpack SDK
         run: |
-          wget -q "${{ matrix.sdk_url }}" -O sdk.tar.zst
+          wget -q "${{ env.SDK_URL }}" -O sdk.tar.zst
           tar -xf sdk.tar.zst
-          mv "${{ matrix.sdk_dir }}" "$HOME/openwrt"
+          mv "${{ env.SDK_DIR }}" "$HOME/openwrt"
           rm -f sdk.tar.zst
 
       - name: Add feeds
@@ -84,8 +81,8 @@ jobs:
         run: |
           cd "$HOME/openwrt"
           {
-            echo "${{ matrix.target_cfg }}"
-            echo "${{ matrix.subtarget_cfg }}"
+            echo "CONFIG_TARGET_x86=y"
+            echo "CONFIG_TARGET_x86_64=y"
             echo "CONFIG_PACKAGE_luci-app-homeproxy=y"
             echo "CONFIG_PACKAGE_luci-i18n-homeproxy-zh-cn=y"
             echo "CONFIG_ALL_NONSHARED=n"
@@ -105,21 +102,14 @@ jobs:
           mkdir -p "$GITHUB_WORKSPACE/output"
           find "$HOME/openwrt/bin/packages/" -type f -name "*homeproxy*.apk" \
             -exec cp -f {} "$GITHUB_WORKSPACE/output/" \; 2>/dev/null || true
-          cd "$GITHUB_WORKSPACE/output"
-          echo "=== collected ==="
-          ls -lh
-          for f in *.apk; do
-            [ -f "$f" ] || continue
-            mv -f "$f" "${f%.apk}_${{ matrix.arch }}.apk"
-          done
-          echo "=== renamed (arch-suffixed) ==="
-          ls -lh
-          test -n "$(ls -A *.apk 2>/dev/null)" || { echo "::error::no apk produced"; exit 1; }
+          ls -lh "$GITHUB_WORKSPACE/output"/
+          test -n "$(ls -A "$GITHUB_WORKSPACE/output"/*.apk 2>/dev/null)" \
+            || { echo "::error::no apk produced"; exit 1; }
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: apk-${{ matrix.arch }}
+          name: apk-noarch
           path: ${{ github.workspace }}/output/*.apk
           if-no-files-found: error
 
@@ -132,7 +122,7 @@ jobs:
     needs: build
     runs-on: ubuntu-24.04
     steps:
-      - name: Download all artifacts
+      - name: Download artifacts
         uses: actions/download-artifact@v4
         with:
           path: dist
@@ -147,11 +137,11 @@ jobs:
         run: |
           set -euo pipefail
           {
-            echo "## luci-app-homeproxy (patched) · x86_64 + aarch64"
+            echo "## luci-app-homeproxy (patched) · noarch"
             echo ""
             echo "- **Firmware:** OpenWrt 25.12.2"
-            echo "- **Arch:** x86_64 / aarch64"
-            echo "- **改动:** 自动提取订阅链接内嵌证书（tls_certificate / cert / pinSHA256），保持 tls_insecure=0，无需 insecure。"
+            echo "- **包架构:** \`noarch\`（源自 \`LUCI_PKGARCH:=all\`），一个包通吃 x86_64 / aarch64 / 其它架构"
+            echo "- **改动:** 自动提取订阅链接内嵌证书（tls_certificate / cert / pinSHA256），保持 tls_insecure=0，无需 insecure"
             echo ""
             echo "### 安装"
             echo '```bash'
@@ -164,7 +154,7 @@ jobs:
           } > /tmp/body.md
           gh release delete "${{ github.ref_name }}" --yes 2>/dev/null || true
           gh release create "${{ github.ref_name }}" \
-            --title "luci-app-homeproxy (patched) · x86_64 + aarch64 · #${{ github.run_number }}" \
+            --title "luci-app-homeproxy (patched) · noarch · #${{ github.run_number }}" \
             --notes-file /tmp/body.md \
             --repo "${{ github.repository }}" \
             -- dist/*.apk

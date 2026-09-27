@@ -36,11 +36,14 @@ vless://...?pinSHA256=...      # 公钥哈希形式
 
 ## 编译（GitHub Actions）
 
-Workflow：`.github/workflows/build.yml`，矩阵构建 **x86_64** 与 **aarch64** 两个架构：
+Workflow：`.github/workflows/build.yml`，**单次编译产出一个 noarch 包**：
 
-- SDK：OpenWrt 25.12.2（`x86/64` 与 `armsr/armv8`）
+- 包架构为 `noarch`（来自 Makefile 的 `LUCI_PKGARCH:=all`，可用 `apk adbdump <pkg>` 核对 `arch:` 字段），
+  **一个包通吃 x86_64 / aarch64 / 其它架构**，因此无需按架构分别编译
+- SDK：OpenWrt 25.12.2（`x86/64`，仅作为编译宿主，不影响产物架构）
 - 源码：**本仓库自身**（检出后复制进 SDK 的 `package/custom/homeproxy`，不再拉取上游）
-- 产物：`luci-app-homeproxy` + `luci-i18n-homeproxy-zh-cn` 的 `.apk`，文件名带架构后缀，发布到 Release
+- 产物：`luci-app-homeproxy` + `luci-i18n-homeproxy-zh-cn` 的 `.apk`，发布到 Release
+- `Ensure disk space` 仅在可用空间 < 20 GiB 时清理 runner 预装 SDK；空间充足时自动跳过（约省 1.5 分钟）
 
 触发方式：push 到 `main`（限 `Makefile` / `root/**` / `htdocs/**` / `po/**` / workflow 变更），或在 Actions 页手动 `Run workflow`。
 
@@ -48,8 +51,8 @@ Workflow：`.github/workflows/build.yml`，矩阵构建 **x86_64** 与 **aarch64
 
 ```bash
 # 路由器上
-apk add --allow-untrusted /tmp/luci-app-homeproxy-<version>_<arch>.apk
-apk add --allow-untrusted /tmp/luci-i18n-homeproxy-zh-cn-<version>_<arch>.apk
+apk add --allow-untrusted /tmp/luci-app-homeproxy-<version>.apk
+apk add --allow-untrusted /tmp/luci-i18n-homeproxy-zh-cn-<version>.apk
 rm -f /tmp/luci-indexcache.*
 /etc/init.d/rpcd reload
 ```
