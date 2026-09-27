@@ -10,6 +10,7 @@ on:
       - 'htdocs/**'
       - 'po/**'
       - '.github/workflows/build.yml'
+      - '.github/scripts/**'
 
 permissions:
   contents: write
@@ -88,8 +89,8 @@ jobs:
           # 语法错误会静默出厂并让路由器上的订阅更新直接失败 —— 这里显式校验
           fail=0
           for f in src/root/etc/homeproxy/scripts/*.uc; do
-            # 剥离 luci.* 模块 import：构建环境没有 LuCI 模块，仅影响本地解析
-            sed -E "s#^import .* from 'luci\.[^']*';\$##" "$f" > "$RUNNER_TEMP/chk.uc"
+            # 剥离全部 import（裸 ucode 解析不了 luci / uci / ubus / homeproxy 模块）
+            python3 src/.github/scripts/ucode-strip-imports.py "$f" "$RUNNER_TEMP/chk.uc"
             if "$UCODE_BIN" -c "$RUNNER_TEMP/chk.uc"; then
               echo "OK   $f"
             else
