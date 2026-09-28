@@ -7,7 +7,7 @@
 
 'use strict';
 
-import { readfile, writefile } from 'fs';
+import { readfile, writefile, lsdir, unlink, basename } from 'fs';
 import { isnan } from 'math';
 import { connect } from 'ubus';
 import { cursor } from 'uci';
@@ -225,6 +225,36 @@ function write_node_certificate(node) {
 	writefile(file, replace(node.tls_cert_pem, /\|/g, '\n') + '\n');
 
 	return file;
+}
+
+/* ===== 清理不再被任何节点引用的证书文件（补丁新增） ===== */
+/* 覆盖"节点消失/改名"的所有路径：订阅同步删除、GUI 手动删除、订阅里节点被移除。
+   改名会生成新文件名的证书并让旧节点被删除，因此这里同时兜住旧文件。 */
+function remove_orphan_certificates() {
+	let dir = HP_DIR + '/certs';
+	let entries = lsdir(dir);
+
+	if (type(entries) !== 'array')
+		return;
+
+	/* 先收集所有节点当前仍引用的证书文件名 */
+	let keep = {};
+
+	uci.foreach(uciconfig, ucinode, (cfg) => {
+		if (cfg.tls_cert_path)
+			keep[basename(cfg.tls_cert_path)] = true;
+	});
+
+	for (let name in entries) {
+		/* 只清理本补丁生成的 <节点名>-<哈希8>.pem，绝不动用户自己上传的证书 */
+		if (!match(name, /^[A-Za-z0-9._-]+-[0-9a-f]{8}\.pem$/))
+			continue;
+
+		if (name in keep)
+			continue;
+
+		unlink(dir + '/' + name);
+	}
 }
 /* ===== 补丁结束 ===== */
 
@@ -988,3 +1018,6 @@ if (routing_mode in ['bypass_mainland_china', 'custom']) {
 
 system('mkdir -p ' + RUN_DIR);
 writefile(RUN_DIR + '/sing-box-c.json', sprintf('%.J\n', removeBlankAttrs(config)));
+
+/* 清理已无节点引用的证书文件（补丁新增） */
+remove_orphan_certificates();

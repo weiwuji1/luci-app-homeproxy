@@ -162,6 +162,28 @@ jobs:
 
           exit $fail
 
+      - name: Verify certificate cleanup logic on real ucode
+        run: |
+          set -uo pipefail
+
+          UCODE_BIN="$RUNNER_TEMP/ucode-bin/ucode"
+
+          if [ ! -x "$UCODE_BIN" ]; then
+            echo "::warning::ucode 不可用，跳过清理逻辑校验（不阻塞构建）"
+            exit 0
+          fi
+
+          # ucode 模块（fs 等）需要 -L 指定搜索路径
+          MODDIR="$(find "$RUNNER_TEMP/ucode-build" -name '*.so' -type f -printf '%h\n' 2>/dev/null | sort -u | head -n1)"
+
+          if [ -z "$MODDIR" ]; then
+            echo "::warning::未找到 ucode 模块目录，跳过清理逻辑校验"
+            exit 0
+          fi
+
+          echo "ucode 模块目录: $MODDIR"
+          "$UCODE_BIN" -L "$MODDIR" src/.github/scripts/check-orphan-cleanup.uc
+
       - name: Download and unpack SDK
         run: |
           wget -q "${{ matrix.pkg.sdk_url }}" -O sdk.tar.zst
