@@ -14,12 +14,18 @@ const dir = '/tmp/ucode-orphan-check';
 system('rm -rf ' + dir);
 system('mkdir -p ' + dir);
 
-/* 三种文件：节点 A 的证书（保留）、已被删除节点 B 的证书（应清理）、用户自己上传的（必须保留） */
-writefile(dir + '/sing-box_anytls-12ab34cd.pem', 'x');
-writefile(dir + '/gone-node-5678ef90.pem', 'x');
+/* 四种文件：
+   1) 仍被节点引用的证书（保留）—— 刻意用真实节点名，含空格
+   2) 节点已被删除、遗留的证书（必须清理）—— 同样含空格，
+      专门回归"前缀不能做字符白名单"这个坑（真实节点名就叫 "sing-box anytls"）
+   3) 用户自己上传的证书（必须保留）—— 名字不含 -<8位十六进制> 签名
+   4) 用户自传但名字恰好带 -<8位十六进制> 的（会被清理）—— 已知取舍，README 有说明 */
+writefile(dir + '/sing-box anytls-12ab34cd.pem', 'x');
+writefile(dir + '/sing-box hysteria2-5678ef90.pem', 'x');
 writefile(dir + '/client_ca.pem', 'x');
+writefile(dir + '/my-own-cert-deadbeef.pem', 'x');
 
-const keep = { 'sing-box_anytls-12ab34cd.pem': true };
+const keep = { 'sing-box anytls-12ab34cd.pem': true };
 const entries = lsdir(dir);
 
 if (type(entries) !== 'array') {
@@ -28,7 +34,7 @@ if (type(entries) !== 'array') {
 }
 
 for (let name in entries) {
-	if (!match(name, /^[A-Za-z0-9._-]+-[0-9a-f]{8}\.pem$/))
+	if (!match(name, /^.+-[0-9a-f]{8}\.pem$/))
 		continue;
 
 	if (name in keep)
@@ -38,13 +44,15 @@ for (let name in entries) {
 }
 
 const left = lsdir(dir);
-let count = 0, sawKept = false, sawUser = false;
+let count = 0, sawKept = false, sawUser = false, sawTradeOff = false;
 
 for (let name in left) {
-	if (name === 'sing-box_anytls-12ab34cd.pem')
+	if (name === 'sing-box anytls-12ab34cd.pem')
 		sawKept = true;
 	else if (name === 'client_ca.pem')
 		sawUser = true;
+	else if (name === 'my-own-cert-deadbeef.pem')
+		sawTradeOff = true;
 
 	count++;
 }
@@ -52,7 +60,7 @@ for (let name in left) {
 print('剩余文件: ' + sprintf('%J', left) + '\n');
 print('basename(): ' + (basename('/etc/homeproxy/certs/a.pem') === 'a.pem' ? 'OK' : 'FAIL') + '\n');
 
-const ok = (count === 2) && sawKept && sawUser;
+const ok = (count === 2) && sawKept && sawUser && !sawTradeOff;
 
 print(ok ? '孤儿证书清理算法 OK\n' : 'FAIL: 清理结果不符合预期\n');
 

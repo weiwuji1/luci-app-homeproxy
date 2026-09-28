@@ -39,7 +39,9 @@ anytls://...?tls_certificate=-----BEGIN%20CERTIFICATE-----%2C...%2C-----END%20CE
 - **证书生命周期闭环**：`generate_client.uc` 每次生成 sing-box 配置后，会清理
   `/etc/homeproxy/certs/` 下**已无任何节点引用**的证书文件，覆盖三种路径——订阅同步删除节点、
   GUI 手动删除节点、订阅里节点被移除（含节点改名导致的旧文件残留）。
-  清理**只针对本补丁生成的 `<节点名>-<哈希8>.pem` 命名**，用户自己上传的证书（如 `client_ca.pem`）绝不动。
+  清理**只针对本补丁生成的 `<节点名>-<哈希8>.pem` 命名**（以结尾的 `-<8位十六进制>.pem` 作签名；
+  节点名可能含空格/中文，故前缀不做字符白名单），用户自己上传的证书（如 `client_ca.pem`）绝不动。
+  **已知取舍**：用户自传的证书若文件名恰好也以 `-<8位十六进制>.pem` 结尾、且未被任何节点引用，会被一并清理。
 - **前端路径（手动 Import share links）**：浏览器没有文件系统，只把证书编码成单行 `tls_cert_pem`
   （PEM 换行 → `|`，PEM 内不含 `|`），由 `generate_client.uc` 在生成配置时还原为 `RUN_DIR/certs/<节点>.pem`。
 - 两条路径互不干扰：`write_node_certificate()` 仅在 `tls_cert_pem` 非空时才落盘，否则原样返回 `tls_cert_path`。

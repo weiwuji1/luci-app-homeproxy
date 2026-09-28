@@ -246,8 +246,10 @@ function remove_orphan_certificates() {
 	});
 
 	for (let name in entries) {
-		/* 只清理本补丁生成的 <节点名>-<哈希8>.pem，绝不动用户自己上传的证书 */
-		if (!match(name, /^[A-Za-z0-9._-]+-[0-9a-f]{8}\.pem$/))
+		/* 只清理本补丁生成的 <节点名>-<哈希8>.pem，绝不动用户自己上传的证书。
+		   节点名可能含空格/中文（如 "sing-box anytls"），故前缀不能用字符白名单，
+		   只以结尾的 -<8位十六进制>.pem 作为本补丁生成物的签名。 */
+		if (!match(name, /^.+-[0-9a-f]{8}\.pem$/))
 			continue;
 
 		if (name in keep)
