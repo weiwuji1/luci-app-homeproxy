@@ -121,7 +121,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ${{ runner.temp }}/ucode-bin
-          key: ucode-syntax-checker-${{ runner.os }}-v1
+          key: ucode-syntax-checker-${{ runner.os }}-v2
 
       - name: Validate ucode syntax of patched scripts
         run: |
@@ -140,6 +140,14 @@ jobs:
           else
             echo "ucode 语法检查器来自缓存"
           fi
+
+          # ucode 模块（fs 等）随二进制一起放进缓存目录，供后续校验脚本用；
+          # 只缓存 ucode-bin 一个目录，缓存命中时 ucode-build 是不存在的。
+          if [ ! -d "$RUNNER_TEMP/ucode-bin/lib" ] && [ -d "$RUNNER_TEMP/ucode-build" ]; then
+            mkdir -p "$RUNNER_TEMP/ucode-bin/lib"
+            ( cd "$RUNNER_TEMP/ucode-build" && find . -name '*.so' -exec cp -f {} "$RUNNER_TEMP/ucode-bin/lib/" \; ) || true
+          fi
+          ls "$RUNNER_TEMP/ucode-bin/lib" 2>/dev/null | head -5 || true
 
           if ! "$UCODE_BIN" -e 'exit(0)'; then
             echo "::warning::ucode 不可用，跳过语法检查（不阻塞构建）"
@@ -173,11 +181,11 @@ jobs:
             exit 0
           fi
 
-          # ucode 模块（fs 等）需要 -L 指定搜索路径
-          MODDIR="$(find "$RUNNER_TEMP/ucode-build" -name '*.so' -type f -printf '%h\n' 2>/dev/null | sort -u | head -n1)"
+          # 模块目录与二进制同在缓存目录（见上一步），不再用 find 探测
+          MODDIR="$RUNNER_TEMP/ucode-bin/lib"
 
-          if [ -z "$MODDIR" ]; then
-            echo "::warning::未找到 ucode 模块目录，跳过清理逻辑校验"
+          if [ ! -d "$MODDIR" ]; then
+            echo "::warning::未找到 ucode 模块目录，跳过清理逻辑校验（不阻塞构建）"
             exit 0
           fi
 
