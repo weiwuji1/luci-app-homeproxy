@@ -1,6 +1,16 @@
 name: Build luci-app-homeproxy (patched, noarch)
 on:
   workflow_dispatch:
+    inputs:
+      firmware:
+        description: '要编译的目标固件（25.12 出 apk / 24.10 出 ipk / both 两者都出）'
+        type: choice
+        required: true
+        default: both
+        options:
+          - both
+          - '25.12'
+          - '24.10'
   push:
     branches:
       - main
@@ -17,22 +27,73 @@ permissions:
 
 env:
   TZ: Asia/Shanghai
-  # luci-app-homeproxy 的元数据是 arch: noarch（源自 Makefile 里 LUCI_PKGARCH:=all），
-  # 一个包即可装到任意架构，因此只需用一个 SDK 编译一次。
-  SDK_URL: https://downloads.openwrt.org/releases/25.12.2/targets/x86/64/openwrt-sdk-25.12.2-x86-64_gcc-14.3.0_musl.Linux-x86_64.tar.zst
-  SDK_DIR: openwrt-sdk-25.12.2-x86-64_gcc-14.3.0_musl.Linux-x86_64
 
 jobs:
+  # 手动触发时按选择只编一种；push 触发时两种都编。
+  # 注意：matrix 上下文不能用在 job 级 if: 上，所以这里用 prepare 动态生成 matrix。
+  prepare:
+    name: Resolve build targets
+    runs-on: ubuntu-24.04
+    outputs:
+      matrix: ${{ steps.targets.outputs.matrix }}
+      targets: ${{ steps.targets.outputs.targets }}
+    steps:
+      - name: Resolve targets
+        id: targets
+        env:
+          TARGET: ${{ inputs.firmware || 'both' }}
+        run: |
+          set -euo pipefail
+
+          # luci-app-homeproxy 的元数据是 arch: noarch / all（源自 Makefile 里 LUCI_PKGARCH:=all），
+          # 一个包即可装到任意架构，因此每种格式只需用一个 SDK 编译一次。
+          cat > /tmp/apk.json <<'JSON'
+          {"name":"apk","fw":"25.12","ext":"apk","artifact":"apk-noarch","feeds_branch":"openwrt-25.12","sdk_url":"https://downloads.openwrt.org/releases/25.12.2/targets/x86/64/openwrt-sdk-25.12.2-x86-64_gcc-14.3.0_musl.Linux-x86_64.tar.zst","sdk_dir":"openwrt-sdk-25.12.2-x86-64_gcc-14.3.0_musl.Linux-x86_64"}
+          JSON
+          cat > /tmp/ipk.json <<'JSON'
+          {"name":"ipk","fw":"24.10","ext":"ipk","artifact":"ipk-noarch","feeds_branch":"openwrt-24.10","sdk_url":"https://downloads.openwrt.org/releases/24.10.8/targets/x86/64/openwrt-sdk-24.10.8-x86-64_gcc-13.3.0_musl.Linux-x86_64.tar.zst","sdk_dir":"openwrt-sdk-24.10.8-x86-64_gcc-13.3.0_musl.Linux-x86_64"}
+          JSON
+
+          case "$TARGET" in
+            '25.12'|apk) matrix="{\"pkg\":[$(cat /tmp/apk.json)]}" ;;
+            '24.10'|ipk) matrix="{\"pkg\":[$(cat /tmp/ipk.json)]}" ;;
+            both|'')     matrix="{\"pkg\":[$(cat /tmp/apk.json),$(cat /tmp/ipk.json)]}" ;;
+            *) echo "::error::未知的 firmware 输入：$TARGET"; exit 1 ;;
+          esac
+
+          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
+          echo "targets=$TARGET" >> "$GITHUB_OUTPUT"
+          echo "本次编译目标：$TARGET"
+          echo "$matrix"
+
   build:
-    name: Build noarch package
+    name: Build noarch package (${{ matrix.pkg.name }})
+    needs: prepare
     runs-on: ubuntu-24.04
     timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.prepare.outputs.matrix) }}
 
     steps:
       - name: Checkout patched source
         uses: actions/checkout@v4
         with:
           path: src
+
+      - name: Normalize source mtime to commit time
+        run: |
+          # luci.mk 在包目录里没有 .git 时，用「包目录中最新文件的 mtime」推导版本号（0.YYMMDD.当天秒数）。
+          # 两条腿各自 checkout，时间不同会让 apk / ipk 版本号差几秒；这里统一按 commit 时间：
+          # 同一 commit 的两种格式版本号完全一致，且重跑同一 commit 版本号不变（release 才能对齐）。
+          ts="$(git -C src log -1 --format=%ct 2>/dev/null || true)"
+          if [ -z "$ts" ]; then
+            echo "::warning::拿不到 commit 时间，回退为当前时间"
+            ts="$(date -u +%s)"
+          fi
+          stamp="$(date -u -d "@$ts" '+%Y-%m-%dT%H:%M:%SZ')"
+          find src -type f -not -path 'src/.git/*' -exec touch -d "$stamp" {} +
+          echo "版本基准时间: $stamp"
 
       - name: Ensure disk space
         run: |
@@ -103,16 +164,16 @@ jobs:
 
       - name: Download and unpack SDK
         run: |
-          wget -q "${{ env.SDK_URL }}" -O sdk.tar.zst
+          wget -q "${{ matrix.pkg.sdk_url }}" -O sdk.tar.zst
           tar -xf sdk.tar.zst
-          mv "${{ env.SDK_DIR }}" "$HOME/openwrt"
+          mv "${{ matrix.pkg.sdk_dir }}" "$HOME/openwrt"
           rm -f sdk.tar.zst
 
       - name: Add feeds
         run: |
           cd "$HOME/openwrt"
           grep -q immortalwrt_pkgs feeds.conf.default || \
-            echo "src-git immortalwrt_pkgs https://github.com/immortalwrt/packages.git;openwrt-25.12" >> feeds.conf.default
+            echo "src-git immortalwrt_pkgs https://github.com/immortalwrt/packages.git;${{ matrix.pkg.feeds_branch }}" >> feeds.conf.default
           ./scripts/feeds update -a
           ./scripts/feeds install -a
 
@@ -147,17 +208,25 @@ jobs:
       - name: Collect artifacts
         run: |
           mkdir -p "$GITHUB_WORKSPACE/output"
-          find "$HOME/openwrt/bin/packages/" -type f -name "*homeproxy*.apk" \
+          find "$HOME/openwrt/bin/packages/" -type f -name "*homeproxy*.${{ matrix.pkg.ext }}" \
             -exec cp -f {} "$GITHUB_WORKSPACE/output/" \; 2>/dev/null || true
           ls -lh "$GITHUB_WORKSPACE/output"/
-          test -n "$(ls -A "$GITHUB_WORKSPACE/output"/*.apk 2>/dev/null)" \
-            || { echo "::error::no apk produced"; exit 1; }
+          test -n "$(ls -A "$GITHUB_WORKSPACE/output"/*.${{ matrix.pkg.ext }} 2>/dev/null)" \
+            || { echo "::error::no ${{ matrix.pkg.ext }} produced"; exit 1; }
+          # ipk 是 opkg 包，把 CONTROL 元数据打出来，方便确认 Architecture: all 与依赖
+          if [ "${{ matrix.pkg.ext }}" = "ipk" ]; then
+            for f in "$GITHUB_WORKSPACE/output"/*.ipk; do
+              echo "--- $(basename "$f") ---"
+              tar -xzOf "$f" ./control.tar.gz 2>/dev/null | tar -xzO ./control 2>/dev/null \
+                || tar -xzOf "$f" ./CONTROL/control 2>/dev/null || true
+            done
+          fi
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: apk-noarch
-          path: ${{ github.workspace }}/output/*.apk
+          name: ${{ matrix.pkg.artifact }}
+          path: ${{ github.workspace }}/output/*.${{ matrix.pkg.ext }}
           if-no-files-found: error
 
       - name: Cleanup SDK
@@ -166,7 +235,9 @@ jobs:
 
   release:
     name: Publish release
-    needs: build
+    needs: [prepare, build]
+    # 任一条腿失败则不发布；否则正常发布（本次没编的格式不受影响）
+    if: ${{ always() && !failure() && !cancelled() }}
     runs-on: ubuntu-24.04
     steps:
       - name: Download artifacts
@@ -176,44 +247,127 @@ jobs:
           merge-multiple: true
 
       - name: List artifacts
-        run: ls -lh dist
+        run: |
+          ls -lh dist
+          test -n "$(ls -A dist)" || { echo "::error::没有拿到任何产物"; exit 1; }
 
-      - name: Create release
+      - name: Resolve release version
+        id: ver
+        run: |
+          set -euo pipefail
+          apk_ver=""; ipk_ver=""
+          for f in dist/luci-app-homeproxy-*.apk; do
+            [ -e "$f" ] || continue
+            apk_ver="$(basename "$f" | sed -n 's/^luci-app-homeproxy-\(.*\)\.apk$/\1/p')"
+          done
+          for f in dist/luci-app-homeproxy_*_all.ipk; do
+            [ -e "$f" ] || continue
+            ipk_ver="$(basename "$f" | sed -n 's/^luci-app-homeproxy_\(.*\)_all\.ipk$/\1/p')"
+          done
+          echo "apk 版本: ${apk_ver:-（本次未编译）}"
+          echo "ipk 版本: ${ipk_ver:-（本次未编译）}"
+
+          if [ -n "$apk_ver" ] && [ -n "$ipk_ver" ] && [ "$apk_ver" != "$ipk_ver" ]; then
+            echo "::warning::apk 与 ipk 版本号不一致（$apk_ver / $ipk_ver），发布时取较大者"
+            ver="$(printf '%s\n%s\n' "$apk_ver" "$ipk_ver" | sort -V | tail -1)"
+          else
+            ver="${apk_ver:-$ipk_ver}"
+          fi
+          if [ -z "$ver" ]; then
+            ver="run-${GITHUB_RUN_NUMBER}"
+            echo "::warning::无法从产物名解析出版本号，回退为 $ver"
+          fi
+
+          # tag 带上 commit 短号，保证不同提交绝不撞到同一个 release
+          echo "version=$ver" >> "$GITHUB_OUTPUT"
+          echo "tag=v${ver}-${GITHUB_SHA:0:7}" >> "$GITHUB_OUTPUT"
+          echo "本次发布版本: $ver"
+
+      - name: Build release notes
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GH_REPO: ${{ github.repository }}
+          VERSION: ${{ steps.ver.outputs.version }}
         run: |
           set -euo pipefail
           {
             echo "## luci-app-homeproxy (patched) · noarch"
             echo ""
-            echo "- **Firmware:** OpenWrt 25.12.2"
-            echo "- **包架构:** \`noarch\`（源自 \`LUCI_PKGARCH:=all\`），一个包通吃 x86_64 / aarch64 / 其它架构"
+            echo "- **版本:** \`$VERSION\`"
+            echo "- **对应提交:** \`${GITHUB_SHA}\`"
+            echo "- **包架构:** \`noarch\`（apk）/ \`all\`（ipk），源自 \`LUCI_PKGARCH:=all\`，一个包通吃 x86_64 / aarch64 / 其它架构"
             echo "- **改动:** 自动提取订阅链接内嵌证书（tls_certificate / cert / pinSHA256），保持 tls_insecure=0，无需 insecure"
             echo ""
-            echo "### 安装"
+            if ls dist/*.apk >/dev/null 2>&1; then
+              echo "### OpenWrt 25.12+（apk）"
+              echo ""
+              echo '```bash'
+              for f in dist/*.apk; do
+                echo "apk add --allow-untrusted /tmp/$(basename "$f")"
+              done
+              echo '```'
+              echo ""
+            fi
+            if ls dist/*.ipk >/dev/null 2>&1; then
+              echo "### OpenWrt 24.10（opkg / ipk）"
+              echo ""
+              echo '```bash'
+              for f in dist/*.ipk; do
+                echo "opkg install /tmp/$(basename "$f")"
+              done
+              echo '```'
+              echo ""
+            fi
+            echo "装完清一下 LuCI 缓存："
+            echo ""
             echo '```bash'
-            for f in dist/*.apk; do
-              echo "apk add --allow-untrusted /tmp/$(basename "$f")"
-            done
             echo "rm -f /tmp/luci-indexcache.*"
             echo "/etc/init.d/rpcd reload"
             echo '```'
           } > /tmp/body.md
-          # 本 job 无 checkout，gh 无法从 git remote 推断仓库，必须显式 --repo
-          gh release delete "${{ github.ref_name }}" --yes --repo "${{ github.repository }}" \
-            || echo "::notice::没有同名 release 需要删除"
-          gh release create "${{ github.ref_name }}" \
-            --title "luci-app-homeproxy (patched) · noarch · #${{ github.run_number }}" \
-            --notes-file /tmp/body.md \
-            --repo "${{ github.repository }}" \
-            -- dist/*.apk
+          cat /tmp/body.md
 
-      - name: Cleanup old releases
-        uses: dev-drprasad/delete-older-releases@v0.3.4
-        with:
-          keep_latest: 10
-          delete_tags: true
-          repo: ${{ github.repository }}
+      - name: Create or update release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          VERSION: ${{ steps.ver.outputs.version }}
+          TAG: ${{ steps.ver.outputs.tag }}
+        run: |
+          set -euo pipefail
+          REPO="${{ github.repository }}"
+          # 一个版本一个独立 release，已有 release 绝不删除重建；
+          # tag 已存在说明是同一提交重跑或补编另一种格式，只补充/覆盖本次编出来的资产。
+          # 本 job 无 checkout，gh 无法从 git remote 推断仓库，必须显式 --repo
+          if gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
+            echo "::notice::release $TAG 已存在（同一提交重跑或补编另一种格式），只更新资产"
+          else
+            gh release create "$TAG" --repo "$REPO" \
+              --title "luci-app-homeproxy (patched) · noarch · $VERSION" \
+              --notes-file /tmp/body.md
+          fi
+          gh release edit "$TAG" --repo "$REPO" \
+            --title "luci-app-homeproxy (patched) · noarch · $VERSION" \
+            --notes-file /tmp/body.md
+
+          gh release upload "$TAG" --repo "$REPO" --clobber dist/*
+
+      - name: Keep only the latest 2 releases
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          REPO="${{ github.repository }}"
+          # 保留最新 2 个 release（当前版本 + 1 个历史版本），更早的连同 tag 一起删掉
+          gh release list --repo "$REPO" --limit 100 --json tagName,createdAt \
+            --jq 'sort_by(.createdAt) | reverse | .[2:] | .[].tagName' > /tmp/old-tags.txt
+          if [ -s /tmp/old-tags.txt ]; then
+            while IFS= read -r tag; do
+              [ -n "$tag" ] || continue
+              echo "删除历史 release: $tag"
+              gh release delete "$tag" --repo "$REPO" --yes --cleanup-tag
+            done < /tmp/old-tags.txt
+          else
+            echo "release 总数不超过 2 个，无需清理"
+          fi
+          echo "当前 release："
+          gh release list --repo "$REPO"
